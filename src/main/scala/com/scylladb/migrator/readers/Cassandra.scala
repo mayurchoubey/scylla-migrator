@@ -14,7 +14,6 @@ import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.types.{ IntegerType, LongType, StructField, StructType }
 import org.apache.spark.sql.{ DataFrame, Row, SparkSession }
 import org.apache.spark.unsafe.types.UTF8String
-import com.datastax.oss.driver.api.core.ConsistencyLevel
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -27,10 +26,12 @@ object Cassandra {
 
   def determineCopyType(tableDef: TableDef,
                         preserveTimesRequest: Boolean): Either[Throwable, CopyType] =
-    if (tableDef.columnTypes.exists(_.isCollection) && preserveTimesRequest)
-      Left(new Exception(
-        "TTL/Writetime preservation is unsupported for tables with collection types. Please check in your config the option 'preserveTimestamps' and set it to false to continue."))
-    else if (preserveTimesRequest && tableDef.regularColumns.nonEmpty)
+    // if (tableDef.columnTypes.exists(_.isCollection) && preserveTimesRequest)
+    //   Left(new Exception(
+    //     "TTL/Writetime preservation is unsupported for tables with collection types. Please check in your config the option 'preserveTimestamps' and set it to false to continue."))
+    // else if (preserveTimesRequest && tableDef.regularColumns.nonEmpty)
+    //   Right(CopyType.WithTimestampPreservation)
+    if (preserveTimesRequest && tableDef.regularColumns.nonEmpty)
       Right(CopyType.WithTimestampPreservation)
     else if (preserveTimesRequest && tableDef.regularColumns.isEmpty) {
       log.warn("No regular columns in the table - disabling timestamp preservation")
@@ -102,8 +103,8 @@ object Cassandra {
             case (fieldName, (ordinal, ttlOrdinal, writetimeOrdinal)) =>
               (
                 fieldName,
-                if (row.isNullAt(ordinal)) CassandraOption.Null
-                else CassandraOption.Value(row.get(ordinal)),
+                if (row.isNullAt(ordinal)) None
+                else CassandraOption.Value(row.get(ordinal)).get,
                 if (row.isNullAt(ttlOrdinal)) None
                 else Some(row.getInt(ttlOrdinal)),
                 if (row.isNullAt(writetimeOrdinal)) None
@@ -135,8 +136,8 @@ object Cassandra {
                   if (row.isNullAt(ord)) None
                   else Some(row.get(ord))
                 }
-                .getOrElse(fields.getOrElse(field.name, CassandraOption.Unset))
-            } ++ Seq(ttl.getOrElse(0L), writetime.getOrElse(CassandraOption.Unset))
+                .getOrElse(fields.getOrElse(field.name, null))
+            } ++ Seq(ttl.getOrElse(0), writetime.getOrElse(null))
 
             Row(newValues: _*)
         }
@@ -201,34 +202,22 @@ object Cassandra {
 
   def readDataframe(spark: SparkSession,
                     source: SourceSettings.Cassandra,
+                    sourceSplitCount: Int,
                     preserveTimes: Boolean,
                     tokenRangesToSkip: Set[(Token[_], Token[_])]): SourceDataFrame = {
     val connector = Connectors.sourceConnector(spark.sparkContext.getConf, source)
-    val consistencyLevel = source.consistencyLevel match {
-      case "LOCAL_QUORUM" => ConsistencyLevel.LOCAL_QUORUM
-      case "QUORUM"       => ConsistencyLevel.QUORUM
-      case "LOCAL_ONE"    => ConsistencyLevel.LOCAL_ONE
-      case "ONE"          => ConsistencyLevel.ONE
-      case _              => ConsistencyLevel.LOCAL_QUORUM
-    }
-    if (consistencyLevel.toString == source.consistencyLevel) {
-      log.info(
-        s"Using consistencyLevel [${consistencyLevel}] for SOURCE based on source config [${source.consistencyLevel}]")
-    } else {
-      log.info(
-        s"Using DEFAULT consistencyLevel [${consistencyLevel}] for SOURCE based on unrecognized source config [${source.consistencyLevel}]")
-    }
-
     val readConf = ReadConf
       .fromSparkConf(spark.sparkContext.getConf)
       .copy(
-        splitCount       = source.splitCount,
-        fetchSizeInRows  = source.fetchSize,
-        consistencyLevel = consistencyLevel
+        splitCount      = Option(sourceSplitCount).map(_.toInt),
+        fetchSizeInRows = spark.sparkContext.getConf.get("spark.source.fetchSize").toInt
       )
 
+    val keyspace = spark.conf.get("spark.source.keyspace")
+    val tableName = spark.conf.get("spark.source.table")
+    
     val tableDef =
-      connector.withSessionDo(Schema.tableFromCassandra(_, source.keyspace, source.table))
+      connector.withSessionDo(Schema.tableFromCassandra(_, keyspace, tableName))
     log.info("TableDef retrieved for source:")
     log.info(tableDef)
 
@@ -240,19 +229,14 @@ object Cassandra {
 
     val selectCassandraRDD = spark.sparkContext
       .cassandraTable[CassandraSQLRow](
-        source.keyspace,
-        source.table,
+        keyspace,
+        tableName,
         (s, e) => !tokenRangesToSkip.contains((s, e)))
       .withConnector(connector)
       .withReadConf(readConf)
       .select(selection.columnRefs: _*)
 
-    val finalCassandraRDD = source.where match {
-      case Some(filter) => selectCassandraRDD.where(filter)
-      case None         => selectCassandraRDD
-    }
-
-    val rdd = finalCassandraRDD
+    val rdd = selectCassandraRDD
       .asInstanceOf[RDD[Row]]
       .map { row =>
         // We need to handle three conversions here that are not done for us:
@@ -289,6 +273,23 @@ object Cassandra {
       tableDef
     )
 
-    SourceDataFrame(resultingDataframe, selection.timestampColumns, true)
+    log.info("Cassandra read complete")
+        
+    val whereOriCond = spark.conf.get("spark.source.where.clause", null)
+    val whereClause =  if (whereOriCond == null) None else Some(whereOriCond)
+    try {
+      val finalCassandraRDD = whereClause match {
+        case Some(filter) => resultingDataframe.where(filter)
+        case None         => resultingDataframe
+      }      
+      SourceDataFrame(finalCassandraRDD, selection.timestampColumns, true)
+    } catch {
+      case x: Exception   => {
+        log.error("Exception with where clause : "+whereOriCond)
+        SourceDataFrame(resultingDataframe, selection.timestampColumns, true)
+      }
+    }
+
+
   }
 }
