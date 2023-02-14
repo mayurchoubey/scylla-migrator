@@ -3,15 +3,14 @@ package com.scylladb.migrator.writers
 import com.datastax.spark.connector.writer._
 import com.datastax.spark.connector._
 import com.scylladb.migrator.Connectors
-import com.scylladb.migrator.config.{Rename, TargetSettings}
+import com.scylladb.migrator.config.{Credentials, Rename, TargetSettings}
 import com.scylladb.migrator.readers.TimestampColumns
 import org.apache.log4j.{LogManager, Logger}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import com.datastax.oss.driver.api.core.ConsistencyLevel
 
 object Scylla {
   val log: Logger = LogManager.getLogger("com.scylladb.migrator.writer.Scylla")
-
+  log.info("Scylla Target")
   def writeDataframe(
     target: TargetSettings.Scylla,
     renames: List[Rename],
@@ -19,25 +18,8 @@ object Scylla {
     timestampColumns: Option[TimestampColumns],
     tokenRangeAccumulator: Option[TokenRangeAccumulator])(implicit spark: SparkSession): Unit = {
     val connector = Connectors.targetConnector(spark.sparkContext.getConf, target)
-
-    val consistencyLevel = target.consistencyLevel match {
-      case "LOCAL_QUORUM" => ConsistencyLevel.LOCAL_QUORUM
-      case "QUORUM"       => ConsistencyLevel.QUORUM
-      case "LOCAL_ONE"    => ConsistencyLevel.LOCAL_ONE
-      case "ONE"          => ConsistencyLevel.ONE
-      case _              => ConsistencyLevel.LOCAL_QUORUM // Default for Target is LOCAL_QUORUM
-    }
-    if (consistencyLevel.toString == target.consistencyLevel) {
-      log.info(
-        s"Using consistencyLevel [${consistencyLevel}] for TARGET based on target config [${target.consistencyLevel}]")
-    } else {
-      log.info(
-        s"Using DEFAULT consistencyLevel [${consistencyLevel}] for TARGET based on unrecognized target config [${target.consistencyLevel}]")
-    }
-
     val tempWriteConf = WriteConf
       .fromSparkConf(spark.sparkContext.getConf)
-      .copy(consistencyLevel = consistencyLevel)
 
     val writeConf = {
       if (timestampColumns.nonEmpty) {
@@ -47,15 +29,15 @@ object Scylla {
             .map(_.writeTime)
             .fold(TimestampOption.defaultValue)(TimestampOption.perRow)
         )
-      } else if (target.writeTTLInS.nonEmpty || target.writeWritetimestampInuS.nonEmpty) {
+      } else if (spark.conf.get("spark.target.writeTTLInS").nonEmpty || spark.conf.get("spark.target.writeWritetimestampInuS").nonEmpty) {
         var hardcodedTempWriteConf = tempWriteConf
-        if (target.writeTTLInS.nonEmpty) {
+        if (spark.conf.get("spark.target.writeTTLInS").nonEmpty) {
           hardcodedTempWriteConf =
-            hardcodedTempWriteConf.copy(ttl = TTLOption.constant(target.writeTTLInS.get))
+            hardcodedTempWriteConf.copy(ttl = TTLOption.constant(Option(spark.conf.get("spark.target.writeTTLInS")).map(_.toInt).get))
         }
-        if (target.writeWritetimestampInuS.nonEmpty) {
+        if (spark.conf.get("spark.target.writeWritetimestampInuS").nonEmpty) {
           hardcodedTempWriteConf = hardcodedTempWriteConf.copy(
-            timestamp = TimestampOption.constant(target.writeWritetimestampInuS.get))
+            timestamp = TimestampOption.constant(Option(spark.conf.get("spark.target.writeWritetimestampInuS")).map(_.toLong).get))
         }
         hardcodedTempWriteConf
       } else {
@@ -76,11 +58,29 @@ object Scylla {
     log.info("Schema after renames:")
     log.info(renamedSchema.treeString)
 
-    val columnSelector = SomeColumns(renamedSchema.fields.map(_.name: ColumnRef): _*)
+    // target.credentials match {
+    //   case Some(Credentials(username, password)) => {        
+    //     df.write
+    //     .format("org.apache.spark.sql.cassandra")
+    //     .options(Map(
+    //     "keyspace" -> target.keyspace,
+    //     "table" -> target.table,
+    //     "spark.files" -> "/app/secure-connect-database.zip",
+    //     "spark.cassandra.connection.config.cloud.path" -> "secure-connect-database.zip",
+    //     "spark.cassandra.auth.username" -> username,
+    //     "spark.cassandra.auth.password" -> password
+    //     )).save()
+    //   }
+    // }
 
+    val keyspace = spark.conf.get("spark.target.keyspace")
+    val tableName = spark.conf.get("spark.target.table")
+    
+    val columnSelector = SomeColumns(renamedSchema.fields.map(_.name: ColumnRef): _*)
     // Spark's conversion from its internal Decimal type to java.math.BigDecimal
     // pads the resulting value with trailing zeros corresponding to the scale of the
     // Decimal type. Some users don't like this so we conditionally strip those.
+
     val rdd =
       if (!target.stripTrailingZerosForDecimals) df.rdd
       else
@@ -93,10 +93,10 @@ object Scylla {
 
     rdd
       .saveToCassandra(
-        target.keyspace,
-        target.table,
+        keyspace,
+        tableName,
         columnSelector,
-        writeConf,
+        writeConf ,
         tokenRangeAccumulator = tokenRangeAccumulator
       )(connector, SqlRowWriter.Factory)
   }

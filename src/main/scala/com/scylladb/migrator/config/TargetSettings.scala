@@ -7,38 +7,41 @@ import io.circe.syntax._
 
 sealed trait TargetSettings
 object TargetSettings {
-  case class Scylla(host: String,
+  case class Scylla(cloudconnectionbuild: Option[String],
+                    host: String,
                     port: Int,
                     localDC: Option[String],
                     credentials: Option[Credentials],
                     sslOptions: Option[SSLOptions],
-                    keyspace: String,
-                    table: String,
+                    keyspace: Option[String],
+                    table: Option[String],
                     connections: Option[Int],
                     stripTrailingZerosForDecimals: Boolean,
                     writeTTLInS: Option[Int],
-                    writeWritetimestampInuS: Option[Long],
-                    consistencyLevel: String)
+                    writeWritetimestampInuS: Option[Long])
       extends TargetSettings
-
-  case class DynamoDB(endpoint: Option[DynamoDBEndpoint],
-                      region: Option[String],
-                      credentials: Option[AWSCredentials],
-                      table: String,
-                      scanSegments: Option[Int],
-                      writeThroughput: Option[Int],
-                      throughputWritePercent: Option[Float],
-                      maxMapTasks: Option[Int],
-                      streamChanges: Boolean)
+  
+  case class Astra(host: Option[String],
+                   port: Option[Int],
+                   localDC: Option[String],
+                   credentials: Option[Credentials],
+                   sslOptions: Option[SSLOptions],
+                   keyspace: Option[String],
+                   table: Option[String],
+                   connections: Option[Int],
+                   stripTrailingZerosForDecimals: Boolean,
+                   writeTTLInS: Option[Int],
+                   writeWritetimestampInuS: Option[Long],
+                   consistencyLevel: Option[String])
       extends TargetSettings
-
+      
   implicit val decoder: Decoder[TargetSettings] =
     Decoder.instance { cursor =>
       cursor.get[String]("type").flatMap {
         case "scylla" | "cassandra" =>
           deriveDecoder[Scylla].apply(cursor)
-        case "dynamodb" | "dynamo" =>
-          deriveDecoder[DynamoDB].apply(cursor)
+        case "astra" =>
+          deriveDecoder[Astra].apply(cursor)
         case otherwise =>
           Left(DecodingFailure(s"Invalid target type: ${otherwise}", cursor.history))
       }
@@ -49,7 +52,7 @@ object TargetSettings {
       case t: Scylla =>
         deriveEncoder[Scylla].encodeObject(t).add("type", Json.fromString("scylla")).asJson
 
-      case t: DynamoDB =>
-        deriveEncoder[DynamoDB].encodeObject(t).add("type", Json.fromString("dynamodb")).asJson
+      case t: Astra =>
+        deriveEncoder[Astra].encodeObject(t).add("type", Json.fromString("astra")).asJson
     }
 }

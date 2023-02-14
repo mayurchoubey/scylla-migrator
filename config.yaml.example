@@ -1,8 +1,8 @@
 # Example configuration for migrating from Cassandra:
 source:
   type: cassandra
-  host: cassandra-server-01
-  port: 9042
+  #host: cassandra-server-01
+  #port: 9042
   #optional, if not specified None will be used
   #localDC: <localdc>
   #credentials:
@@ -23,24 +23,19 @@ source:
   #   - TLS_RSA_WITH_AES_128_CBC_SHA
   #   - TLS_RSA_WITH_AES_256_CBC_SHA
   #  protocol: TLS
-  keyspace: stocks
-  table: stocks
-  # Consistency Level for the source connection
-  # Options are: LOCAL_ONE, ONE, LOCAL_QUORUM, QUORUM.
-  # Connector driver default is LOCAL_ONE. Our recommendation is LOCAL_QUORUM.
-  # If using ONE or LOCAL_ONE, ensure the source system is fully repaired.
-  consistencyLevel: LOCAL_QUORUM
+  # keyspace: stocks
+  # table: stocks
   # Preserve TTLs and WRITETIMEs of cells in the source database. Note that this
   # option is *incompatible* when copying tables with collections (lists, maps, sets).
-  preserveTimestamps: true
+  #preserveTimestamps: true
   # Number of splits to use - this should be at minimum the amount of cores
   # available in the Spark cluster, and optimally more; higher splits will lead
   # to more fine-grained resumes. Aim for 8 * (Spark cores).
-  splitCount: 256
+  #splitCount: 256
   # Number of connections to use to Cassandra when copying
-  connections: 8
+  #connections: 8
   # Number of rows to fetch in each read
-  fetchSize: 1000
+  #fetchSize: 1000
   # Optional condition to filter source table data that will be migrated
   # where: race_start_date = '2015-05-27' AND race_end_date = '2015-05-27'
 
@@ -103,9 +98,13 @@ source:
 
 # Configuration for the database you're copying into
 target:
-  type: scylla
-  host: scylla 
-  port: 9042
+  type: astra
+  # NOTE: The destination table must have the same schema as the source table.
+  # If you'd like to rename columns, that's ok - see the renames parameter below.
+  # keyspace: stocks
+  # table: stocks
+  #host: scylla 
+  #port: 9042
   #optional, if not specified None will be used
   #localDC: <localdc>
   #credentials:
@@ -126,16 +125,8 @@ target:
   #   - TLS_RSA_WITH_AES_128_CBC_SHA
   #   - TLS_RSA_WITH_AES_256_CBC_SHA
   #  protocol: TLS
-  # NOTE: The destination table must have the same schema as the source table.
-  # If you'd like to rename columns, that's ok - see the renames parameter below.
-  keyspace: stocks
-  table: stocks
-  # Consistency Level for the target connection
-  # Options are: LOCAL_ONE, ONE, LOCAL_QUORUM, QUORUM.
-  # Connector driver default is LOCAL_QUORUM.
-  consistencyLevel: LOCAL_QUORUM
   # Number of connections to use to Scylla when copying
-  connections: 16
+  #connections: 16
   # Spark pads decimals with zeros appropriate to their scale. This causes values
   # like '3.5' to be copied as '3.5000000000...' to the target. There's no good way
   # currently to preserve the original value, so this flag can strip trailing zeros
@@ -192,7 +183,7 @@ target:
 savepoints:
   # Where should savepoint configurations be stored? This is a path on the host running
   # the Spark driver - usually the Spark master.
-  path: /app/savepoints
+  path: /data/savepoints/
   # Interval in which savepoints will be created
   intervalSeconds: 300
 
@@ -219,4 +210,3 @@ validation:
   floatingPointTolerance: 0.001
   # What difference in ms should we allow between timestamps?
   timestampMsTolerance: 0
-

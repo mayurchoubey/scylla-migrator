@@ -7,13 +7,23 @@ import com.scylladb.migrator.config.{ MigratorConfig, SourceSettings, TargetSett
 import com.scylladb.migrator.validation.RowComparisonFailure
 import org.apache.log4j.{ Level, LogManager, Logger }
 import org.apache.spark.sql.SparkSession
-import com.datastax.oss.driver.api.core.ConsistencyLevel
 
 object Validator {
   val log = LogManager.getLogger("com.scylladb.migrator")
 
   def runValidation(config: MigratorConfig)(
     implicit spark: SparkSession): List[RowComparisonFailure] = {
+    
+    log.info("spark.sparkContext.getConf :: " + spark.sparkContext.getConf)
+    val arrayConfig = spark.sparkContext.getConf.getAll
+    for (conf <- arrayConfig)
+      println(conf._1 + ", " + conf._2)
+
+    val keyspace_source = spark.conf.get("spark.source.keyspace")
+    val tableName_source = spark.conf.get("spark.source.table")
+    val keyspace_target = spark.conf.get("spark.target.keyspace")
+    val tableName_target = spark.conf.get("spark.target.table")
+    
     val sourceSettings = config.source match {
       case s: SourceSettings.Cassandra => s
       case otherwise =>
@@ -23,7 +33,7 @@ object Validator {
     }
 
     val targetSettings = config.target match {
-      case s: TargetSettings.Scylla => s
+      case s: TargetSettings.Astra => s
       case otherwise =>
         throw new RuntimeException(
           s"Validation only supports validating against Cassandra/Scylla " +
@@ -34,19 +44,19 @@ object Validator {
     val sourceConnector: CassandraConnector =
       Connectors.sourceConnector(spark.sparkContext.getConf, sourceSettings)
     val targetConnector: CassandraConnector =
-      Connectors.targetConnector(spark.sparkContext.getConf, targetSettings)
+      Connectors.targetConnectorAstra(spark.sparkContext.getConf, targetSettings)
 
     val renameMap = config.renames.map(rename => rename.from -> rename.to).toMap
     val sourceTableDef =
       sourceConnector.withSessionDo(
-        Schema.tableFromCassandra(_, sourceSettings.keyspace, sourceSettings.table))
+        Schema.tableFromCassandra(_, keyspace_source, tableName_source))
 
     val source = {
       val regularColumnsProjection =
         sourceTableDef.regularColumns.flatMap { colDef =>
           val alias = renameMap.getOrElse(colDef.columnName, colDef.columnName)
 
-          if (sourceSettings.preserveTimestamps)
+          if (spark.conf.get("spark.source.preserveTimestamps").toBoolean)
             List(
               ColumnName(colDef.columnName, Some(alias)),
               WriteTime(colDef.columnName, Some(alias + "_writetime")),
@@ -59,31 +69,15 @@ object Validator {
         (sourceTableDef.partitionKey ++ sourceTableDef.clusteringColumns)
           .map(colDef => ColumnName(colDef.columnName, renameMap.get(colDef.columnName)))
 
-      val consistencyLevel = sourceSettings.consistencyLevel match {
-        case "LOCAL_QUORUM" => ConsistencyLevel.LOCAL_QUORUM
-        case "QUORUM"       => ConsistencyLevel.QUORUM
-        case "LOCAL_ONE"    => ConsistencyLevel.LOCAL_ONE
-        case "ONE"          => ConsistencyLevel.ONE
-        case _              => ConsistencyLevel.LOCAL_QUORUM
-      }
-      if (consistencyLevel.toString == sourceSettings.consistencyLevel) {
-        log.info(
-          s"Using consistencyLevel [${consistencyLevel}] for VALIDATOR SOURCE based on validator source config [${sourceSettings.consistencyLevel}]")
-      } else {
-        log.info(
-          s"Using DEFAULT consistencyLevel [${consistencyLevel}] for VALIDATOR SOURCE based on unrecognized validator source config [${sourceSettings.consistencyLevel}]")
-      }
-
       spark.sparkContext
-        .cassandraTable(sourceSettings.keyspace, sourceSettings.table)
+        .cassandraTable(keyspace_source, tableName_source)
         .withConnector(sourceConnector)
         .withReadConf(
           ReadConf
             .fromSparkConf(spark.sparkContext.getConf)
             .copy(
-              splitCount       = sourceSettings.splitCount,
-              fetchSizeInRows  = sourceSettings.fetchSize,
-              consistencyLevel = consistencyLevel
+              splitCount      = Option(spark.conf.get("spark.source.splitCount")).map(_.toInt),
+              fetchSizeInRows = spark.conf.get("spark.source.fetchSize").toInt
             )
         )
         .select(primaryKeyProjection ++ regularColumnsProjection: _*)
@@ -94,7 +88,7 @@ object Validator {
         sourceTableDef.regularColumns.flatMap { colDef =>
           val renamedColName = renameMap.getOrElse(colDef.columnName, colDef.columnName)
 
-          if (sourceSettings.preserveTimestamps)
+          if (spark.conf.get("spark.source.preserveTimestamps").toBoolean)
             List(
               ColumnName(renamedColName),
               WriteTime(renamedColName, Some(renamedColName + "_writetime")),
@@ -112,8 +106,8 @@ object Validator {
 
       source
         .leftJoinWithCassandraTable(
-          targetSettings.keyspace,
-          targetSettings.table,
+          keyspace_target,
+          tableName_target,
           SomeColumns(primaryKeyProjection ++ regularColumnsProjection: _*),
           SomeColumns(joinKey: _*))
         .withConnector(targetConnector)
@@ -140,8 +134,6 @@ object Validator {
     implicit val spark = SparkSession
       .builder()
       .appName("scylla-validator")
-      .config("spark.task.maxFailures", "1024")
-      .config("spark.stage.maxConsecutiveAttempts", "60")
       .getOrCreate
 
     Logger.getRootLogger.setLevel(Level.WARN)
@@ -149,8 +141,17 @@ object Validator {
     Logger.getLogger("org.apache.spark.scheduler.TaskSetManager").setLevel(Level.INFO)
     Logger.getLogger("com.datastax.spark.connector.cql.CassandraConnector").setLevel(Level.INFO)
 
-    val migratorConfig =
-      MigratorConfig.loadFrom(spark.conf.get("spark.scylla.config"))
+    log.info("**** Validation Begins ****")
+
+    var configFileContent = "";
+    var migratorConfig = MigratorConfig(null,null,null,null,null,null);
+    if(spark.conf.get("spark.scylla.deployment").equals("dataproc")){
+      val configRdd = spark.sparkContext.wholeTextFiles(spark.conf.get("spark.scylla.config"))
+      configRdd.collect.foreach(t=>configFileContent = t._2)
+      migratorConfig = MigratorConfig.loadFromFileContent(configFileContent)
+    } else{
+      migratorConfig = MigratorConfig.loadFrom(spark.conf.get("spark.scylla.config"))
+    }
 
     log.info(s"Loaded config: ${migratorConfig}")
 
