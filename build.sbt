@@ -22,12 +22,12 @@ lazy val root = (project in file(".")).settings(
     "org.apache.spark" %% "spark-streaming" % "3.1.1" % "provided",
     "org.apache.spark" %% "spark-sql" % "3.1.1" % "provided",
     "org.apache.spark" %% "spark-sql" % "3.1.1" % "provided",
-    "org.yaml" % "snakeyaml" % "1.23",
-    "io.circe" %% "circe-yaml" % "0.9.0",
-    "io.circe" %% "circe-generic" % "0.9.0",
+    "org.yaml" % "snakeyaml" % "1.33",
+    "io.circe" %% "circe-yaml" % "0.10.0",
+    "io.circe" %% "circe-generic" % "0.10.0",
     "org.scalatest" %% "scalatest" % "3.0.1" % "test",
     "org.scalacheck" %% "scalacheck" % "1.13.4" % "test",
-    "com.google.cloud" % "google-cloud-storage" % "2.17.2"
+    "com.google.cloud" % "google-cloud-storage" % "1.100.0"
 
   ),
   assemblyShadeRules in assembly := Seq(
